@@ -424,6 +424,94 @@ def gmail_labels(args):
 
 
 
+def gmail_unread(args):
+    """List unread messages, optionally filtered by query."""
+    query = "is:unread"
+    if args.query:
+        query = f"is:unread {args.query}"
+
+    if _gws_binary():
+        results = _run_gws(
+            ["gmail", "users", "messages", "list"],
+            params={"userId": "me", "q": query, "maxResults": args.max},
+        )
+        messages = results.get("messages", [])
+        output = []
+        for msg_meta in messages:
+            msg = _run_gws(
+                ["gmail", "users", "messages", "get"],
+                params={
+                    "userId": "me",
+                    "id": msg_meta["id"],
+                    "format": "metadata",
+                    "metadataHeaders": ["From", "To", "Subject", "Date"],
+                },
+            )
+            headers = _headers_dict(msg)
+            output.append({
+                "id": msg["id"],
+                "threadId": msg["threadId"],
+                "from": headers.get("From", ""),
+                "to": headers.get("To", ""),
+                "subject": headers.get("Subject", ""),
+                "date": headers.get("Date", ""),
+                "snippet": msg.get("snippet", ""),
+                "labels": msg.get("labelIds", []),
+            })
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+        return
+
+    service = build_service("gmail", "v1")
+    results = service.users().messages().list(
+        userId="me", q=query, maxResults=args.max,
+    ).execute()
+    messages = results.get("messages", [])
+    if not messages:
+        print(json.dumps([], indent=2))
+        return
+
+    output = []
+    for msg_meta in messages:
+        msg = service.users().messages().get(
+            userId="me", id=msg_meta["id"], format="metadata",
+            metadataHeaders=["From", "To", "Subject", "Date"],
+        ).execute()
+        headers = _headers_dict(msg)
+        output.append({
+            "id": msg["id"],
+            "threadId": msg["threadId"],
+            "from": headers.get("From", ""),
+            "to": headers.get("To", ""),
+            "subject": headers.get("Subject", ""),
+            "date": headers.get("Date", ""),
+            "snippet": msg.get("snippet", ""),
+            "labels": msg.get("labelIds", []),
+        })
+    print(json.dumps(output, indent=2, ensure_ascii=False))
+
+
+def gmail_create_label(args):
+    """Create a new Gmail label."""
+    label_body = {
+        "name": args.name,
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+
+    if _gws_binary():
+        result = _run_gws(
+            ["gmail", "users", "labels", "create"],
+            params={"userId": "me"},
+            body=label_body,
+        )
+        print(json.dumps({"status": "created", "id": result["id"], "name": result["name"]}, indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    result = service.users().labels().create(userId="me", body=label_body).execute()
+    print(json.dumps({"status": "created", "id": result["id"], "name": result["name"]}, indent=2))
+
+
 def gmail_modify(args):
     body = {}
     if args.add_labels:
@@ -445,9 +533,181 @@ def gmail_modify(args):
     print(json.dumps({"id": result["id"], "labels": result.get("labelIds", [])}, indent=2))
 
 
+def gmail_batch_modify(args):
+    """Batch modify multiple messages: mark read/unread, add/remove labels."""
+    message_ids = [mid.strip() for mid in args.message_ids.split(",") if mid.strip()]
+    if not message_ids:
+        print(json.dumps({"error": "No message IDs provided"}), file=sys.stderr)
+        sys.exit(1)
+
+    body = {}
+    if args.add_labels:
+        body["addLabelIds"] = args.add_labels.split(",")
+    if args.remove_labels:
+        body["removeLabelIds"] = args.remove_labels.split(",")
+
+    if _gws_binary():
+        _run_gws(
+            ["gmail", "users", "messages", "batchModify"],
+            params={"userId": "me"},
+            body={"ids": message_ids, **body},
+        )
+        print(json.dumps({"status": "ok", "modified": len(message_ids)}, indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    service.users().messages().batchModify(
+        userId="me", body={"ids": message_ids, **body},
+    ).execute()
+    print(json.dumps({"status": "ok", "modified": len(message_ids)}, indent=2))
+
+
+def gmail_trash(args):
+    """Move one or more messages to trash."""
+    message_ids = [mid.strip() for mid in args.message_ids.split(",") if mid.strip()]
+    if not message_ids:
+        print(json.dumps({"error": "No message IDs provided"}), file=sys.stderr)
+        sys.exit(1)
+
+    trashed = []
+    failed = []
+
+    for mid in message_ids:
+        try:
+            if _gws_binary():
+                result = _run_gws(
+                    ["gmail", "users", "messages", "trash"],
+                    params={"userId": "me", "id": mid},
+                )
+                trashed.append(result.get("id", mid))
+            else:
+                if not hasattr(gmail_trash, "_service"):
+                    gmail_trash._service = build_service("gmail", "v1")
+                result = gmail_trash._service.users().messages().trash(userId="me", id=mid).execute()
+                trashed.append(result["id"])
+        except Exception as exc:
+            failed.append({"id": mid, "error": str(exc)})
+
+    output = {"status": "trashed", "count": len(trashed), "trashed": trashed}
+    if failed:
+        output["failed"] = failed
+    print(json.dumps(output, indent=2))
+
+
+def gmail_archive(args):
+    """Archive messages by removing the INBOX label."""
+    message_ids = [mid.strip() for mid in args.message_ids.split(",") if mid.strip()]
+    if not message_ids:
+        print(json.dumps({"error": "No message IDs provided"}), file=sys.stderr)
+        sys.exit(1)
+
+    body = {"removeLabelIds": ["INBOX"]}
+
+    if len(message_ids) == 1:
+        if _gws_binary():
+            result = _run_gws(
+                ["gmail", "users", "messages", "modify"],
+                params={"userId": "me", "id": message_ids[0]},
+                body=body,
+            )
+            print(json.dumps({"status": "archived", "id": result["id"]}, indent=2))
+            return
+        service = build_service("gmail", "v1")
+        result = service.users().messages().modify(userId="me", id=message_ids[0], body=body).execute()
+        print(json.dumps({"status": "archived", "id": result["id"]}, indent=2))
+        return
+
+    if _gws_binary():
+        _run_gws(
+            ["gmail", "users", "messages", "batchModify"],
+            params={"userId": "me"},
+            body={"ids": message_ids, **body},
+        )
+        print(json.dumps({"status": "archived", "count": len(message_ids)}, indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    service.users().messages().batchModify(
+        userId="me", body={"ids": message_ids, **body},
+    ).execute()
+    print(json.dumps({"status": "archived", "count": len(message_ids)}, indent=2))
+
+
 # =========================================================================
 # Calendar
 # =========================================================================
+
+
+def _list_all_calendars():
+    """Return a list of {id, summary, accessRole} for all visible calendars."""
+    if _gws_binary():
+        results = _run_gws(["calendar", "calendarList", "list"])
+        return [
+            {
+                "id": c["id"],
+                "summary": c.get("summary", c["id"]),
+                "accessRole": c.get("accessRole", ""),
+            }
+            for c in results.get("items", [])
+        ]
+
+    service = build_service("calendar", "v3")
+    results = service.calendarList().list().execute()
+    return [
+        {
+            "id": c["id"],
+            "summary": c.get("summary", c["id"]),
+            "accessRole": c.get("accessRole", ""),
+        }
+        for c in results.get("items", [])
+    ]
+
+
+def _format_event(e, calendar_name=""):
+    """Normalize a Google Calendar event into the Hermes output format."""
+    event = {
+        "id": e["id"],
+        "summary": e.get("summary", "(no title)"),
+        "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
+        "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
+        "location": e.get("location", ""),
+        "description": e.get("description", ""),
+        "status": e.get("status", ""),
+        "htmlLink": e.get("htmlLink", ""),
+    }
+    if calendar_name:
+        event["calendar"] = calendar_name
+    return event
+
+
+def _fetch_events_for_calendar(calendar_id, time_min, time_max, max_results):
+    """Fetch events from a single calendar."""
+    if _gws_binary():
+        results = _run_gws(
+            ["calendar", "events", "list"],
+            params={
+                "calendarId": calendar_id,
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "maxResults": max_results,
+                "singleEvents": True,
+                "orderBy": "startTime",
+            },
+        )
+        return results.get("items", [])
+
+    service = build_service("calendar", "v3")
+    results = service.events().list(
+        calendarId=calendar_id, timeMin=time_min, timeMax=time_max,
+        maxResults=max_results, singleEvents=True, orderBy="startTime",
+    ).execute()
+    return results.get("items", [])
+
+
+def calendar_calendars(args):
+    """List all visible calendars."""
+    calendars = _list_all_calendars()
+    print(json.dumps(calendars, indent=2, ensure_ascii=False))
 
 
 def calendar_list(args):
@@ -455,51 +715,22 @@ def calendar_list(args):
     time_min = _datetime_with_timezone(args.start or now.isoformat())
     time_max = _datetime_with_timezone(args.end or (now + timedelta(days=7)).isoformat())
 
-    if _gws_binary():
-        results = _run_gws(
-            ["calendar", "events", "list"],
-            params={
-                "calendarId": args.calendar,
-                "timeMin": time_min,
-                "timeMax": time_max,
-                "maxResults": args.max,
-                "singleEvents": True,
-                "orderBy": "startTime",
-            },
-        )
-        events = []
-        for e in results.get("items", []):
-            events.append({
-                "id": e["id"],
-                "summary": e.get("summary", "(no title)"),
-                "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
-                "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
-                "location": e.get("location", ""),
-                "description": e.get("description", ""),
-                "status": e.get("status", ""),
-                "htmlLink": e.get("htmlLink", ""),
-            })
-        print(json.dumps(events, indent=2, ensure_ascii=False))
+    if args.all_calendars:
+        calendars = _list_all_calendars()
+        all_events = []
+        for cal in calendars:
+            try:
+                items = _fetch_events_for_calendar(cal["id"], time_min, time_max, args.max)
+                for e in items:
+                    all_events.append(_format_event(e, calendar_name=cal["summary"]))
+            except Exception as exc:
+                print(f"Warning: could not read calendar '{cal['summary']}' ({cal['id']}): {exc}", file=sys.stderr)
+        all_events.sort(key=lambda ev: ev.get("start", ""))
+        print(json.dumps(all_events, indent=2, ensure_ascii=False))
         return
 
-    service = build_service("calendar", "v3")
-    results = service.events().list(
-        calendarId=args.calendar, timeMin=time_min, timeMax=time_max,
-        maxResults=args.max, singleEvents=True, orderBy="startTime",
-    ).execute()
-
-    events = []
-    for e in results.get("items", []):
-        events.append({
-            "id": e["id"],
-            "summary": e.get("summary", "(no title)"),
-            "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
-            "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
-            "location": e.get("location", ""),
-            "description": e.get("description", ""),
-            "status": e.get("status", ""),
-            "htmlLink": e.get("htmlLink", ""),
-        })
+    items = _fetch_events_for_calendar(args.calendar, time_min, time_max, args.max)
+    events = [_format_event(e) for e in items]
     print(json.dumps(events, indent=2, ensure_ascii=False))
 
 
@@ -765,8 +996,17 @@ def main():
     p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
     p.set_defaults(func=gmail_reply)
 
+    p = gmail_sub.add_parser("unread", help="List unread messages")
+    p.add_argument("query", nargs="?", default="", help="Additional search filter (e.g. 'from:boss@co.com')")
+    p.add_argument("--max", type=int, default=10)
+    p.set_defaults(func=gmail_unread)
+
     p = gmail_sub.add_parser("labels")
     p.set_defaults(func=gmail_labels)
+
+    p = gmail_sub.add_parser("create-label", help="Create a new label")
+    p.add_argument("name", help="Label name (supports nesting with '/', e.g. 'Projects/Alpha')")
+    p.set_defaults(func=gmail_create_label)
 
     p = gmail_sub.add_parser("modify")
     p.add_argument("message_id")
@@ -774,15 +1014,33 @@ def main():
     p.add_argument("--remove-labels", default="", help="Comma-separated label IDs to remove")
     p.set_defaults(func=gmail_modify)
 
+    p = gmail_sub.add_parser("batch-modify", help="Batch modify multiple messages")
+    p.add_argument("message_ids", help="Comma-separated message IDs")
+    p.add_argument("--add-labels", default="", help="Comma-separated label IDs to add")
+    p.add_argument("--remove-labels", default="", help="Comma-separated label IDs to remove")
+    p.set_defaults(func=gmail_batch_modify)
+
+    p = gmail_sub.add_parser("trash", help="Move messages to trash")
+    p.add_argument("message_ids", help="Comma-separated message IDs")
+    p.set_defaults(func=gmail_trash)
+
+    p = gmail_sub.add_parser("archive", help="Archive messages (remove from inbox)")
+    p.add_argument("message_ids", help="Comma-separated message IDs")
+    p.set_defaults(func=gmail_archive)
+
     # --- Calendar ---
     cal = sub.add_parser("calendar")
     cal_sub = cal.add_subparsers(dest="action", required=True)
+
+    p = cal_sub.add_parser("calendars", help="List all visible calendars")
+    p.set_defaults(func=calendar_calendars)
 
     p = cal_sub.add_parser("list")
     p.add_argument("--start", default="", help="Start time (ISO 8601)")
     p.add_argument("--end", default="", help="End time (ISO 8601)")
     p.add_argument("--max", type=int, default=25)
     p.add_argument("--calendar", default="primary")
+    p.add_argument("--all-calendars", action="store_true", help="Query all visible calendars and merge results")
     p.set_defaults(func=calendar_list)
 
     p = cal_sub.add_parser("create")

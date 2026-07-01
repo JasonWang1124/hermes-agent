@@ -174,6 +174,10 @@ $GAPI gmail search "is:unread" --max 10
 $GAPI gmail search "from:boss@company.com newer_than:1d"
 $GAPI gmail search "has:attachment filename:pdf newer_than:7d"
 
+# List unread messages (shortcut for is:unread, supports additional filters)
+$GAPI gmail unread --max 20
+$GAPI gmail unread "from:boss@company.com" --max 5
+
 # Read full message (returns JSON with body text)
 $GAPI gmail get MESSAGE_ID
 
@@ -186,18 +190,54 @@ $GAPI gmail send --to user@example.com --subject "Hello" --from '"Research Agent
 $GAPI gmail reply MESSAGE_ID --body "Thanks, that works for me."
 $GAPI gmail reply MESSAGE_ID --from '"Support Bot" <user@example.com>' --body "Thanks"
 
-# Labels
+# Labels — list, create, add/remove
 $GAPI gmail labels
+$GAPI gmail create-label "Projects/Alpha"
 $GAPI gmail modify MESSAGE_ID --add-labels LABEL_ID
 $GAPI gmail modify MESSAGE_ID --remove-labels UNREAD
+
+# Mark as read / unread
+$GAPI gmail modify MESSAGE_ID --remove-labels UNREAD          # mark read
+$GAPI gmail modify MESSAGE_ID --add-labels UNREAD             # mark unread
+
+# Batch modify — mark multiple messages at once
+$GAPI gmail batch-modify "MSG_ID1,MSG_ID2,MSG_ID3" --remove-labels UNREAD    # batch mark read
+$GAPI gmail batch-modify "MSG_ID1,MSG_ID2" --add-labels LABEL_ID             # batch add label
+
+# Archive (remove from inbox) — single or multiple
+$GAPI gmail archive "MSG_ID1,MSG_ID2,MSG_ID3"
+
+# Trash — single or multiple (loops internally, safe 30-day recovery)
+$GAPI gmail trash MESSAGE_ID
+$GAPI gmail trash "MSG_ID1,MSG_ID2,MSG_ID3"
 ```
+
+#### 信件分類流程
+
+當信件量大需要整理時，建議這個順序：
+
+1. **查未讀信件**：`gmail unread --max 30` 快速掃描
+2. **建立需要的標籤**：`gmail create-label "分類名稱"`（支援巢狀，用 `/` 分層，如 `專案/Alpha`）
+3. **批次分類**：`gmail batch-modify "ID1,ID2,ID3" --add-labels LABEL_ID`
+4. **批次已讀**：`gmail batch-modify "ID1,ID2,ID3" --remove-labels UNREAD`
+5. **封存不需要的**：`gmail archive "ID1,ID2,ID3"`
 
 ### Calendar
 
 ```bash
-# List events (defaults to next 7 days)
+# List all visible calendars (check which calendars are available)
+$GAPI calendar calendars
+
+# List events (defaults to next 7 days, primary calendar only)
 $GAPI calendar list
 $GAPI calendar list --start 2026-03-01T00:00:00Z --end 2026-03-07T23:59:59Z
+
+# List events from ALL calendars (merged and sorted by start time)
+$GAPI calendar list --all-calendars
+$GAPI calendar list --all-calendars --start 2026-06-29T00:00:00+08:00 --end 2026-07-06T00:00:00+08:00
+
+# List events from a specific calendar
+$GAPI calendar list --calendar "user@company.com" --start 2026-03-01T00:00:00Z --end 2026-03-07T23:59:59Z
 
 # Create event (ISO 8601 with timezone required)
 $GAPI calendar create --summary "Team Standup" --start 2026-03-01T10:00:00-06:00 --end 2026-03-01T10:30:00-06:00
@@ -207,6 +247,15 @@ $GAPI calendar create --summary "Review" --start 2026-03-01T14:00:00Z --end 2026
 # Delete event
 $GAPI calendar delete EVENT_ID
 ```
+
+#### 日曆查詢注意事項（台灣時區）
+
+當使用者問「這週行程」「本週有什麼」時，**不要直接用預設的 7 天查詢**，要：
+
+1. **算出正確的週區間**：台灣的「這週」= 週一 00:00 到週日 24:00（UTC+8）。例如今天是週三 07/01,本週 = `--start 2026-06-29T00:00:00+08:00 --end 2026-07-06T00:00:00+08:00`。
+2. **查所有日曆**：使用 `--all-calendars` 而非只查 primary，避免漏掉公司或共用日曆的事件。
+3. **日曆查不到的用 Gmail 補**：如果日曆工具因為權限或其他限制拿不到完整資料，用 `gmail search` 搜尋會議邀請和 Meet 會議記錄來補齊（搜尋關鍵字：`meeting OR invitation OR 會議 OR meet.google.com`）。
+4. **誠實標註來源**：回答時標註每筆資料來自日曆還是信件，拿不到標題就說拿不到，不要把不完整結果當完整回覆。
 
 ### Drive
 
@@ -246,8 +295,14 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 - **Gmail search**: `[{id, threadId, from, to, subject, date, snippet, labels}]`
 - **Gmail get**: `{id, threadId, from, to, subject, date, labels, body}`
+- **Gmail unread**: `[{id, threadId, from, to, subject, date, snippet, labels}]`
 - **Gmail send/reply**: `{status: "sent", id, threadId}`
-- **Calendar list**: `[{id, summary, start, end, location, description, htmlLink}]`
+- **Gmail create-label**: `{status: "created", id, name}`
+- **Gmail batch-modify**: `{status: "ok", modified: N}`
+- **Gmail trash**: `{status: "trashed", count, trashed: [ids], failed?: [...]}`
+- **Gmail archive**: `{status: "archived", id|count}`
+- **Calendar calendars**: `[{id, summary, accessRole}]`
+- **Calendar list**: `[{id, summary, start, end, location, description, htmlLink}]` (with `--all-calendars`: adds `calendar` field)
 - **Calendar create**: `{status: "created", id, summary, htmlLink}`
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`
 - **Contacts list**: `[{name, emails: [...], phones: [...]}]`
